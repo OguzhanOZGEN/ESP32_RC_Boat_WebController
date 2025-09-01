@@ -32,40 +32,58 @@ Bu dosya ESP32 RC Boat WebController projesindeki tüm önemli değişiklikleri 
 
 ---
 
-## [v1.0] - 2025-08-XX
+## [v1.5] - 2025-08-XX
 
-### 🎯 İlk Sürüm
-- **Temel RC Bot kontrolü**
-- WiFi Access Point (AP) modu
-- MX1508 motor sürücü desteği
-- SG90 servo kontrolü
-- Batarya voltaj ölçümü
-- Web tabanlı kontrol arayüzü
-- Basit trim sistemi
-- EEPROM ile ayar saklama
-
-### 🔧 Özellikler
-- ESPAsyncWebServer ile web arayüzü
-- Real-time joystick kontrolü
-- Batarya seviye göstergesi
-- Kritik batarya koruması
+### 🧪 Deneysel Özellikler
+- **İlk trim sistemi denemesi**
+- Basit EEPROM tabanlı ayar saklama
+- Gelişmiş batarya yönetimi
 - EMA filtreli voltaj ölçümü
 - Dinamik yük kompanzasyonu
+- Kritik batarya koruması
+
+### 🔧 Teknik Detaylar
+- ESPAsyncWebServer optimizasyonları
+- Gelişmiş ADC ölçüm sistemi
+- Histerezis tabanlı kritik batarya kontrolü
+
+---
+
+## [v1.0] - 2025-08-XX
+
+### 🎯 İlk Basit Sürüm
+- **Hiç trim sistemi YOK - sadece temel kontrol**
+- WiFi Access Point (AP) modu
+- MX1508 motor sürücü desteği
+- SG90 servo kontrolü (sabit 45-135° arası)
+- Basit batarya voltaj ölçümü
+- Minimalist web tabanlı kontrol arayüzü
+
+### 🔧 Özellikler
+- ESPAsyncWebServer ile basit web arayüzü
+- Real-time joystick kontrolü
+- Temel batarya seviye göstergesi
+- Kritik batarya koruması (basit)
+- Sade, anlaşılır kod yapısı
 
 ---
 
 ## Versiyon Erişimi
 
-- **v2.0 (Güncel)**: Ana branch (`main`)
-- **v1.0 (Eski)**: Tag ile erişim (`git checkout v1.0`)
+- **v2.0 (Güncel)**: Ana branch (`main`) - Gelişmiş trim sistemi
+- **v1.5 (Ara)**: Tag ile erişim (`git checkout v1.5`) - İlk trim denemesi  
+- **v1.0 (Basit)**: Tag ile erişim (`git checkout v1.0`) - Hiç trim YOK
 
 ### GitHub Releases
 Bu versiyonlara GitHub'dan da erişebilirsiniz:
 - [v2.0 Release](https://github.com/OguzhanOZGEN/ESP32_RC_Boat_WebController/releases/tag/v2.0)
+- [v1.5 Release](https://github.com/OguzhanOZGEN/ESP32_RC_Boat_WebController/releases/tag/v1.5)
 - [v1.0 Release](https://github.com/OguzhanOZGEN/ESP32_RC_Boat_WebController/releases/tag/v1.0)
 
 ### Eski Versiyona Geçiş
 ```bash
-git checkout v1.0  # Eski versiyona geçiş
+git checkout v1.0   # En basit versiyona geçiş (trim YOK)
+git checkout v1.5   # İlk trim denemesine geçiş  
+git checkout v2.0   # Gelişmiş trim sistemine geçiş
 git checkout main   # Son versiyona geri dönüş
 ```
