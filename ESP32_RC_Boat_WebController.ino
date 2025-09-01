@@ -6,7 +6,29 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <ESP32Servo.h>
+#include <EEPROM.h>
 #include <math.h>  // fabsf için
+
+/* ====== EEPROM Ayarları ====== */
+#define EEPROM_SIZE 64
+#define TRIM_ADDR_THROTTLE 0     // Gaz trim (int, 4 byte)
+#define STEERING_ADDR_ANGLE 4    // Yön servo açısı (int, 4 byte)
+#define SERVO_ADDR_MIN 8         // Servo min açı (int, 4 byte)
+#define SERVO_ADDR_MAX 12        // Servo max açı (int, 4 byte)
+#define MAGIC_ADDR 16            // Magic number (int, 4 byte) - ilk kurulum kontrolü
+#define MAGIC_NUMBER 0x12345678
+
+/* ====== Trim ve Servo Ayarları ====== */
+int g_throttleTrim = 0;     // Gaz trim: -100 ile +100 arası
+int g_steeringAngle = 90;   // Yön servo açısı: 0-180 derece
+int g_servoMinAngle = 60;   // Servo minimum açı
+int g_servoMaxAngle = 120;  // Servo maksimum açı
+
+// Geçici trim değerleri (slider hareket ederken kullanılır)
+int g_tempThrottleTrim = 0;
+int g_tempSteeringAngle = 90;
+int g_tempServoMinAngle = 60;
+int g_tempServoMaxAngle = 120;
 
 /* ====== Wi-Fi (AP) ====== */
 const char* AP_SSID = "TEKNE_AP";
@@ -93,6 +115,51 @@ void setMotor(int speed) { // -255..+255
   }
 }
 
+/* ====== EEPROM Fonksiyonları ====== */
+void loadSettingsFromEEPROM() {
+  int magic;
+  EEPROM.get(MAGIC_ADDR, magic);
+  
+  if (magic == MAGIC_NUMBER) {
+    // Ayarlar daha önce kaydedilmiş, yükle
+    EEPROM.get(TRIM_ADDR_THROTTLE, g_throttleTrim);
+    EEPROM.get(STEERING_ADDR_ANGLE, g_steeringAngle);
+    EEPROM.get(SERVO_ADDR_MIN, g_servoMinAngle);
+    EEPROM.get(SERVO_ADDR_MAX, g_servoMaxAngle);
+    
+    // Güvenlik kontrolü
+    g_throttleTrim = constrain(g_throttleTrim, -100, 100);
+    g_steeringAngle = constrain(g_steeringAngle, 0, 180);
+    g_servoMinAngle = constrain(g_servoMinAngle, 0, 180);
+    g_servoMaxAngle = constrain(g_servoMaxAngle, 0, 180);
+    
+    // Geçici değerleri de güncelle
+    g_tempThrottleTrim = g_throttleTrim;
+    g_tempSteeringAngle = g_steeringAngle;
+    g_tempServoMinAngle = g_servoMinAngle;
+    g_tempServoMaxAngle = g_servoMaxAngle;
+    
+    Serial.println("Ayarlar EEPROM'dan yüklendi:");
+    Serial.printf("Gaz Trim: %d, Yön Açısı: %d°\n", g_throttleTrim, g_steeringAngle);
+    Serial.printf("Servo Min: %d°, Max: %d°\n", g_servoMinAngle, g_servoMaxAngle);
+  } else {
+    // İlk kurulum, varsayılan ayarları kaydet
+    saveSettingsToEEPROM();
+    Serial.println("İlk kurulum - varsayılan ayarlar kaydedildi");
+  }
+}
+
+void saveSettingsToEEPROM() {
+  EEPROM.put(TRIM_ADDR_THROTTLE, g_throttleTrim);
+  EEPROM.put(STEERING_ADDR_ANGLE, g_steeringAngle);
+  EEPROM.put(SERVO_ADDR_MIN, g_servoMinAngle);
+  EEPROM.put(SERVO_ADDR_MAX, g_servoMaxAngle);
+  EEPROM.put(MAGIC_ADDR, MAGIC_NUMBER);
+  
+  EEPROM.commit();
+  Serial.println("Ayarlar EEPROM'a kaydedildi");
+}
+
 float readBatteryVoltageRaw() {
   // 5 grup × 16 örnek: her grubun ortalamasını al, sonra ortalamaların MEDYAN’ını al.
   const int GROUPS = 5, NS = 16;
@@ -158,8 +225,29 @@ void sampleBatteryFiltered(float &vOut, int &pctOut) {
 void setSteerPct(int pct) {
   pct = constrain(pct, -100, 100);
   g_strPct = pct;
-  int angle = map_i(pct, -100, 100, 73, 123);
-  rudder.write(angle);
+  
+  // Yön kontrolü: pct değerine göre servo açısını ayarla
+  // pct = 0 olduğunda g_tempSteeringAngle kullan
+  // pct != 0 olduğunda min-max arasında haritalama yap
+  int targetAngle;
+  if (pct == 0) {
+    targetAngle = g_tempSteeringAngle; // Trim açısı
+  } else {
+    targetAngle = map_i(pct, -100, 100, g_tempServoMinAngle, g_tempServoMaxAngle);
+  }
+  
+  rudder.write(targetAngle);
+}
+
+void setMotorWithTrim(int pct) {
+  pct = constrain(pct, -100, 100);
+  
+  // Geçici trim değerini kullan
+  int adjustedPct = pct + g_tempThrottleTrim;
+  adjustedPct = constrain(adjustedPct, -100, 100);
+  
+  // Motor PWM değerine çevirme
+  setMotor(map_i(adjustedPct, -100, 100, -255, 255));
 }
 
 /* ====== HTML (UTF-8) – 16:9 + Pointer Capture; şarj bildirimi KALDIRILDI ====== */
@@ -202,6 +290,43 @@ const char index_html[] PROGMEM = R"HTML(
 }
 
   .pad, .knob{touch-action:none}
+  
+  /* Trim Paneli Stilleri */
+  .trimPanel{
+    position:fixed;top:10%;left:10%;right:10%;bottom:10%;
+    background:var(--panel);border:3px solid var(--border);border-radius:20px;
+    padding:20px;display:none;z-index:2000;
+    overflow-y:auto;
+  }
+  .trimHeader{
+    display:flex;justify-content:space-between;align-items:center;
+    margin-bottom:20px;padding-bottom:10px;
+    border-bottom:2px solid var(--border);
+  }
+  .trimTitle{color:var(--ink);font-size:24px;font-weight:700;margin:0}
+  .closeBtn{
+    width:40px;height:40px;border:none;background:var(--warn);color:white;
+    border-radius:50%;cursor:pointer;font-size:24px;font-weight:bold;
+    display:grid;place-items:center;
+  }
+  .closeBtn:hover{opacity:0.8}
+  .trimBtn{width:44px;height:44px;border-radius:12px;border:2px solid #71d2ff;background:var(--panel);color:var(--accent);cursor:pointer;display:grid;place-items:center;font-weight:bold;font-size:18px}
+  .trimBtn:hover{background:var(--accent);color:var(--panel)}
+  .trimContent{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:20px}
+  .trimGroup{background:var(--slot);border:2px solid var(--border);border-radius:12px;padding:15px}
+  .trimLabel{color:var(--ink);font-size:16px;margin-bottom:8px;font-weight:600}
+  .trimSlider{width:100%;margin:8px 0;height:8px;border-radius:4px;background:var(--slot);outline:none;appearance:none}
+  .trimSlider::-webkit-slider-thumb{width:20px;height:20px;border-radius:50%;background:var(--accent);cursor:pointer;appearance:none}
+  .trimSlider::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:var(--accent);cursor:pointer;border:none}
+  .trimValue{color:var(--accent);font-size:14px;text-align:center;font-weight:600;margin-top:5px}
+  .saveBtn{width:100%;padding:15px;background:var(--ok);color:white;border:none;border-radius:12px;cursor:pointer;font-weight:700;font-size:18px}
+  .saveBtn:hover{opacity:0.8}
+  .trimFooter{text-align:center;border-top:2px solid var(--border);padding-top:15px}
+  
+  @media (max-width: 768px) {
+    .trimContent{grid-template-columns:1fr;gap:15px}
+    .trimPanel{padding:15px}
+  }
 </style>
 </head>
 <body>
@@ -212,7 +337,48 @@ const char index_html[] PROGMEM = R"HTML(
       <div class="batt" aria-label="Batarya"><div class="fill green" id="bfill"></div></div>
       <div class="btext"><span id="bpct" style="font-weight:800">--%</span><span class="small" id="bvolt">--.-- V</span></div>
     </div>
-    <div class="fsBtn" id="fsBtn" title="Tam ekran"><div class="fsIcon"></div></div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div class="trimBtn" id="trimBtn" title="Trim Ayarları">⚙</div>
+      <div class="fsBtn" id="fsBtn" title="Tam ekran"><div class="fsIcon"></div></div>
+    </div>
+  </div>
+  
+  <!-- Trim Paneli -->
+  <div class="trimPanel" id="trimPanel">
+    <div class="trimHeader">
+      <h2 class="trimTitle">Trim Ayarları</h2>
+      <button class="closeBtn" id="closeBtn" title="Kapat">×</button>
+    </div>
+    
+    <div class="trimContent">
+      <div class="trimGroup">
+        <div class="trimLabel">Gaz Trim</div>
+        <input type="range" class="trimSlider" id="throttleTrim" min="-100" max="100" value="0">
+        <div class="trimValue" id="throttleTrimValue">0</div>
+      </div>
+      
+      <div class="trimGroup">
+        <div class="trimLabel">Yön Servo Açısı</div>
+        <input type="range" class="trimSlider" id="steeringAngle" min="0" max="180" value="90">
+        <div class="trimValue" id="steeringAngleValue">90°</div>
+      </div>
+      
+      <div class="trimGroup">
+        <div class="trimLabel">Servo Min Açı</div>
+        <input type="range" class="trimSlider" id="servoMin" min="0" max="180" value="60">
+        <div class="trimValue" id="servoMinValue">60°</div>
+      </div>
+      
+      <div class="trimGroup">
+        <div class="trimLabel">Servo Max Açı</div>
+        <input type="range" class="trimSlider" id="servoMax" min="0" max="180" value="120">
+        <div class="trimValue" id="servoMaxValue">120°</div>
+      </div>
+    </div>
+    
+    <div class="trimFooter">
+      <button class="saveBtn" id="saveTrim">KALICI KAYDET</button>
+    </div>
   </div>
 
   <!-- SOL: GAZ (dikey slot) -->
@@ -234,6 +400,17 @@ const strPad = document.getElementById('strPad'), strKnob = document.getElementB
 const fsBtn = document.getElementById('fsBtn');
 const bfill = document.getElementById('bfill'), bpct = document.getElementById('bpct'), bvolt = document.getElementById('bvolt');
 const netStat = document.getElementById('netStat'), netTxt = document.getElementById('netTxt');
+
+/* ==== Trim Kontrolleri ==== */
+const trimBtn = document.getElementById('trimBtn');
+const trimPanel = document.getElementById('trimPanel');
+const closeBtn = document.getElementById('closeBtn');
+const throttleTrim = document.getElementById('throttleTrim');
+const steeringAngle = document.getElementById('steeringAngle');
+const servoMin = document.getElementById('servoMin');
+const servoMax = document.getElementById('servoMax');
+const saveTrim = document.getElementById('saveTrim');
+
 let geom = {};
 
 function layout(){
@@ -445,6 +622,106 @@ fsBtn.addEventListener('click', async ()=>{
   setTimeout(layout,120);
 });
 
+/* ==== Trim Kontrolleri ==== */
+// Panel açma/kapama
+trimBtn.addEventListener('click', ()=>{
+  trimPanel.style.display = 'block';
+  loadTrimSettings();
+});
+
+closeBtn.addEventListener('click', ()=>{
+  trimPanel.style.display = 'none';
+});
+
+// Panel dışına tıklayınca kapat
+trimPanel.addEventListener('click', (e)=>{
+  if(e.target === trimPanel) trimPanel.style.display = 'none';
+});
+
+// Slider değer güncellemeleri ve anlık uygulama
+throttleTrim.addEventListener('input', ()=>{
+  const val = parseInt(throttleTrim.value);
+  document.getElementById('throttleTrimValue').textContent = val;
+  applyTrimLive('throttleTrim', val);
+});
+
+steeringAngle.addEventListener('input', ()=>{
+  const val = parseInt(steeringAngle.value);
+  document.getElementById('steeringAngleValue').textContent = val + '°';
+  applyTrimLive('steeringAngle', val);
+});
+
+servoMin.addEventListener('input', ()=>{
+  const val = parseInt(servoMin.value);
+  document.getElementById('servoMinValue').textContent = val + '°';
+  applyTrimLive('servoMin', val);
+});
+
+servoMax.addEventListener('input', ()=>{
+  const val = parseInt(servoMax.value);
+  document.getElementById('servoMaxValue').textContent = val + '°';
+  applyTrimLive('servoMax', val);
+});
+
+// Anlık trim uygulama (geçici)
+function applyTrimLive(param, value){
+  const data = {};
+  data[param] = value;
+  fetch('/setTrimLive', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  }).catch(e => console.error('Anlık trim hatası:', e));
+}
+
+// Trim ayarlarını yükleme
+async function loadTrimSettings(){
+  try{
+    const r = await fetch('/getTrim');
+    if(r.ok){
+      const data = await r.json();
+      throttleTrim.value = data.throttleTrim;
+      steeringAngle.value = data.steeringAngle;
+      servoMin.value = data.servoMin;
+      servoMax.value = data.servoMax;
+      
+      // Değerleri görsel olarak güncelle
+      document.getElementById('throttleTrimValue').textContent = data.throttleTrim;
+      document.getElementById('steeringAngleValue').textContent = data.steeringAngle + '°';
+      document.getElementById('servoMinValue').textContent = data.servoMin + '°';
+      document.getElementById('servoMaxValue').textContent = data.servoMax + '°';
+    }
+  }catch(e){console.error('Trim yükleme hatası:', e);}
+}
+
+// Trim ayarlarını kaydetme
+saveTrim.addEventListener('click', async ()=>{
+  try{
+    const data = {
+      throttleTrim: parseInt(throttleTrim.value),
+      steeringAngle: parseInt(steeringAngle.value),
+      servoMin: parseInt(servoMin.value),
+      servoMax: parseInt(servoMax.value)
+    };
+    
+    const r = await fetch('/setTrim', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data)
+    });
+    
+    if(r.ok){
+      alert('✅ Trim ayarları EEPROM\'a kalıcı olarak kaydedildi!\n\nGaz trim: ' + data.throttleTrim + '\nYön servo açısı: ' + data.steeringAngle + '°\nMin açı: ' + data.servoMin + '°\nMax açı: ' + data.servoMax + '°');
+      trimPanel.style.display = 'none';
+    } else {
+      alert('❌ Kaydetme hatası! Tekrar deneyin.');
+    }
+  }catch(e){
+    console.error('Trim kaydetme hatası:', e);
+    alert('❌ Bağlantı hatası! İnternet bağlantınızı kontrol edin.');
+  }
+});
+
 /* İlk yerleşim */
 layout();
 </script>
@@ -464,9 +741,12 @@ void setup() {
   analogSetPinAttenuation(ADC_PIN, ADC_11db);   // ~3.6 V giriş aralığı
   analogReadResolution(12);
 
+  // EEPROM'u başlat ve ayarları yükle
+  EEPROM.begin(EEPROM_SIZE);
+  loadSettingsFromEEPROM();
 
   rudder.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
-  rudder.write(SERVO_CENTER);
+  rudder.write(g_steeringAngle);  // Başlangıç servo açısı
 
   WiFi.mode(WIFI_AP);
   WiFi.softAP(AP_SSID, AP_PASS);
@@ -514,7 +794,7 @@ if (g_critLock) {
 
 
       g_thrPct = thrPct;
-      setMotor(map_i(g_thrPct, -100, 100, -255, 255));
+      setMotorWithTrim(g_thrPct);
     }
     if (r->hasParam("steer")) {
       setSteerPct(r->getParam("steer")->value().toInt());
@@ -534,6 +814,94 @@ if (g_critLock) {
     snprintf(buf, sizeof(buf), "{\"v\":%.2f,\"pct\":%d}", v, pct);
     r->send(200, "application/json; charset=utf-8", buf);
   });
+
+  /* Trim ayarlarını getirme */
+  server.on("/getTrim", HTTP_GET, [](AsyncWebServerRequest* r){
+    char buf[200];
+    snprintf(buf, sizeof(buf), 
+      "{\"throttleTrim\":%d,\"steeringAngle\":%d,\"servoMin\":%d,\"servoMax\":%d}",
+      g_throttleTrim, g_steeringAngle, g_servoMinAngle, g_servoMaxAngle);
+    r->send(200, "application/json; charset=utf-8", buf);
+  });
+
+  /* Anlık trim ayarlama (geçici, EEPROM'a yazmaz) */
+  server.on("/setTrimLive", HTTP_POST, [](AsyncWebServerRequest* r){}, NULL, 
+    [](AsyncWebServerRequest* r, uint8_t *data, size_t len, size_t index, size_t total) {
+      String jsonStr = String((char*)data);
+      
+      if(jsonStr.indexOf("\"throttleTrim\":") > -1) {
+        int idx = jsonStr.indexOf("\"throttleTrim\":") + 15;
+        g_tempThrottleTrim = jsonStr.substring(idx, jsonStr.indexOf(',', idx) > -1 ? jsonStr.indexOf(',', idx) : jsonStr.indexOf('}', idx)).toInt();
+        g_tempThrottleTrim = constrain(g_tempThrottleTrim, -100, 100);
+      }
+      
+      if(jsonStr.indexOf("\"steeringAngle\":") > -1) {
+        int idx = jsonStr.indexOf("\"steeringAngle\":") + 16;
+        g_tempSteeringAngle = jsonStr.substring(idx, jsonStr.indexOf(',', idx) > -1 ? jsonStr.indexOf(',', idx) : jsonStr.indexOf('}', idx)).toInt();
+        g_tempSteeringAngle = constrain(g_tempSteeringAngle, 0, 180);
+      }
+      
+      if(jsonStr.indexOf("\"servoMin\":") > -1) {
+        int idx = jsonStr.indexOf("\"servoMin\":") + 11;
+        g_tempServoMinAngle = jsonStr.substring(idx, jsonStr.indexOf(',', idx) > -1 ? jsonStr.indexOf(',', idx) : jsonStr.indexOf('}', idx)).toInt();
+        g_tempServoMinAngle = constrain(g_tempServoMinAngle, 0, 180);
+      }
+      
+      if(jsonStr.indexOf("\"servoMax\":") > -1) {
+        int idx = jsonStr.indexOf("\"servoMax\":") + 11;
+        g_tempServoMaxAngle = jsonStr.substring(idx, jsonStr.indexOf(',', idx) > -1 ? jsonStr.indexOf(',', idx) : jsonStr.indexOf('}', idx)).toInt();
+        g_tempServoMaxAngle = constrain(g_tempServoMaxAngle, 0, 180);
+      }
+      
+      r->send(200, "application/json; charset=utf-8", "{\"success\":true}");
+    });
+
+  /* Trim ayarlarını kalıcı kaydetme (EEPROM'a yaz) */
+  server.on("/setTrim", HTTP_POST, [](AsyncWebServerRequest* r){}, NULL, 
+    [](AsyncWebServerRequest* r, uint8_t *data, size_t len, size_t index, size_t total) {
+      // JSON parse (basit)
+      String jsonStr = String((char*)data);
+      
+      // Basit JSON parsing
+      int throttleTrimIdx = jsonStr.indexOf("\"throttleTrim\":") + 15;
+      int steeringAngleIdx = jsonStr.indexOf("\"steeringAngle\":") + 16;
+      int servoMinIdx = jsonStr.indexOf("\"servoMin\":") + 11;
+      int servoMaxIdx = jsonStr.indexOf("\"servoMax\":") + 11;
+      
+      if(throttleTrimIdx > 15) {
+        g_throttleTrim = jsonStr.substring(throttleTrimIdx, jsonStr.indexOf(',', throttleTrimIdx)).toInt();
+        g_throttleTrim = constrain(g_throttleTrim, -100, 100);
+        g_tempThrottleTrim = g_throttleTrim; // Geçici değeri de güncelle
+      }
+      
+      if(steeringAngleIdx > 16) {
+        g_steeringAngle = jsonStr.substring(steeringAngleIdx, jsonStr.indexOf(',', steeringAngleIdx)).toInt();
+        g_steeringAngle = constrain(g_steeringAngle, 0, 180);
+        g_tempSteeringAngle = g_steeringAngle; // Geçici değeri de güncelle
+      }
+      
+      if(servoMinIdx > 11) {
+        g_servoMinAngle = jsonStr.substring(servoMinIdx, jsonStr.indexOf(',', servoMinIdx)).toInt();
+        g_servoMinAngle = constrain(g_servoMinAngle, 0, 180);
+        g_tempServoMinAngle = g_servoMinAngle; // Geçici değeri de güncelle
+      }
+      
+      if(servoMaxIdx > 11) {
+        String maxStr = jsonStr.substring(servoMaxIdx, jsonStr.indexOf('}', servoMaxIdx));
+        g_servoMaxAngle = maxStr.toInt();
+        g_servoMaxAngle = constrain(g_servoMaxAngle, 0, 180);
+        g_tempServoMaxAngle = g_servoMaxAngle; // Geçici değeri de güncelle
+      }
+      
+      // EEPROM'a kalıcı kaydet
+      saveSettingsToEEPROM();
+      
+      Serial.println("=== TRIM AYARLARI KALICI OLARAK KAYDEDİLDİ ===");
+      Serial.printf("Gaz: %d, Yön Açısı: %d°, Min: %d°, Max: %d°\n",
+                   g_throttleTrim, g_steeringAngle, g_servoMinAngle, g_servoMaxAngle);
+      
+      r->send(200, "application/json; charset=utf-8", "{\"success\":true}");
+    });
 
   server.begin();
 }
